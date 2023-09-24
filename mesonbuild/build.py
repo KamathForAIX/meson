@@ -34,7 +34,7 @@ from .mesonlib import (
     File, MesonException, MachineChoice, PerMachine, OrderedSet, listify,
     extract_as_list, typeslistify, stringlistify, classify_unity_sources,
     get_filenames_templates_dict, substitute_values, has_path_sep,
-    OptionKey, PerMachineDefaultable, OptionOverrideProxy,
+    OptionKey, PerMachineDefaultable,
     MesonBugException, EnvironmentVariables, pickle_load,
 )
 from .compilers import (
@@ -115,9 +115,9 @@ known_build_target_kwargs = (
     cs_kwargs)
 
 known_exe_kwargs = known_build_target_kwargs | {'implib', 'export_dynamic', 'pie'}
-known_shlib_kwargs = known_build_target_kwargs | {'version', 'soversion', 'vs_module_defs', 'darwin_versions'}
-known_shmod_kwargs = known_build_target_kwargs | {'vs_module_defs'}
-known_stlib_kwargs = known_build_target_kwargs | {'pic', 'prelink'}
+known_shlib_kwargs = known_build_target_kwargs | {'version', 'soversion', 'vs_module_defs', 'darwin_versions', 'rust_abi'}
+known_shmod_kwargs = known_build_target_kwargs | {'vs_module_defs', 'rust_abi'}
+known_stlib_kwargs = known_build_target_kwargs | {'pic', 'prelink', 'rust_abi'}
 known_jar_kwargs = known_exe_kwargs | {'main_class', 'java_resources'}
 
 def _process_install_tag(install_tag: T.Optional[T.List[T.Optional[str]]],
@@ -156,6 +156,7 @@ class Headers(HoldableObject):
     custom_install_dir: T.Optional[str]
     custom_install_mode: 'FileMode'
     subproject: str
+    follow_symlinks: T.Optional[bool] = None
 
     # TODO: we really don't need any of these methods, but they're preserved to
     # keep APIs relying on them working.
@@ -214,6 +215,7 @@ class InstallDir(HoldableObject):
     subproject: str
     from_source_dir: bool = True
     install_tag: T.Optional[str] = None
+    follow_symlinks: T.Optional[bool] = None
 
 @dataclass(eq=False)
 class DepManifest:
@@ -535,7 +537,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
                    for k, v in overrides.items()}
         else:
             ovr = {}
-        self.options = OptionOverrideProxy(ovr, self.environment.coredata.options, self.subproject)
+        self.options = coredata.OptionsView(self.environment.coredata.options, self.subproject, ovr)
         # XXX: this should happen in the interpreter
         if has_path_sep(self.name):
             # Fix failing test 53 when this becomes an error.
@@ -655,7 +657,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
             else:
                 self.options.overrides[k] = v
 
-    def get_options(self) -> OptionOverrideProxy:
+    def get_options(self) -> coredata.OptionsView:
         return self.options
 
     def get_option(self, key: 'OptionKey') -> T.Union[str, int, bool, 'WrapMode']:
@@ -789,6 +791,12 @@ class BuildTarget(Target):
             # relocation-model=pic is rustc's default and Meson does not
             # currently have a way to disable PIC.
             self.pic = True
+        if 'vala' in self.compilers and self.is_linkable_target():
+            self.outputs += [self.vala_header, self.vala_vapi]
+            self.install_tag += ['devel', 'devel']
+            if self.vala_gir:
+                self.outputs.append(self.vala_gir)
+                self.install_tag.append('devel')
 
     def __repr__(self):
         repr_str = "<{0} {1}: {2}>"
@@ -1400,12 +1408,7 @@ class BuildTarget(Target):
                 msg = f"Can't link non-PIC static library {t.name!r} into shared library {self.name!r}. "
                 msg += "Use the 'pic' option to static_library to build with PIC."
                 raise InvalidArguments(msg)
-            if self.for_machine is not t.for_machine:
-                msg = f'Tried to mix libraries for machines {self.for_machine} and {t.for_machine} in target {self.name!r}'
-                if self.environment.is_cross_build():
-                    raise InvalidArguments(msg + ' This is not possible in a cross build.')
-                else:
-                    mlog.warning(msg + ' This will fail in cross build.')
+            self.check_can_link_together(t)
             self.link_targets.append(t)
 
     def link_whole(self, targets, promoted: bool = False):
@@ -1421,12 +1424,7 @@ class BuildTarget(Target):
                 msg = f"Can't link non-PIC static library {t.name!r} into shared library {self.name!r}. "
                 msg += "Use the 'pic' option to static_library to build with PIC."
                 raise InvalidArguments(msg)
-            if self.for_machine is not t.for_machine:
-                msg = f'Tried to mix libraries for machines {self.for_machine} and {t.for_machine} in target {self.name!r}'
-                if self.environment.is_cross_build():
-                    raise InvalidArguments(msg + ' This is not possible in a cross build.')
-                else:
-                    mlog.warning(msg + ' This will fail in cross build.')
+            self.check_can_link_together(t)
             if isinstance(self, StaticLibrary) and not self.uses_rust():
                 # When we're a static library and we link_whole: to another static
                 # library, we need to add that target's objects to ourselves.
@@ -1471,6 +1469,17 @@ class BuildTarget(Target):
                 m += (f' Meson had to promote link to link_whole because {origin.name!r} is installed but not {t.name!r},'
                       f' and thus has to include objects from {t.name!r} to be usable.')
             raise InvalidArguments(m)
+
+    def check_can_link_together(self, t: BuildTargetTypes) -> None:
+        links_with_rust_abi = isinstance(t, BuildTarget) and t.uses_rust_abi()
+        if not self.uses_rust() and links_with_rust_abi:
+            raise InvalidArguments(f'Try to link Rust ABI library {t.name!r} with a non-Rust target {self.name!r}')
+        if self.for_machine is not t.for_machine and (not links_with_rust_abi or t.rust_crate_type != 'proc-macro'):
+            msg = f'Tried to mix libraries for machines {self.for_machine} and {t.for_machine} in target {self.name!r}'
+            if self.environment.is_cross_build():
+                raise InvalidArguments(msg + ' This is not possible in a cross build.')
+            else:
+                mlog.warning(msg + ' This will fail in cross build.')
 
     def add_pch(self, language: str, pchlist: T.List[str]) -> None:
         if not pchlist:
@@ -1636,6 +1645,9 @@ class BuildTarget(Target):
 
     def uses_rust(self) -> bool:
         return 'rust' in self.compilers
+
+    def uses_rust_abi(self) -> bool:
+        return self.uses_rust() and self.rust_crate_type in {'dylib', 'rlib', 'proc-macro'}
 
     def uses_fortran(self) -> bool:
         return 'fortran' in self.compilers
@@ -1945,7 +1957,7 @@ class Executable(BuildTarget):
         self.filename = self.name
         if self.suffix:
             self.filename += '.' + self.suffix
-        self.outputs = [self.filename]
+        self.outputs[0] = self.filename
 
         # The import library this target will generate
         self.import_filename = None
@@ -1971,6 +1983,13 @@ class Executable(BuildTarget):
         )
         if create_debug_file:
             self.debug_filename = self.name + '.pdb'
+
+    def process_kwargs(self, kwargs):
+        super().process_kwargs(kwargs)
+
+        self.rust_crate_type = kwargs.get('rust_crate_type') or 'bin'
+        if self.rust_crate_type != 'bin':
+            raise InvalidArguments('Invalid rust_crate_type: must be "bin" for executables.')
 
     def get_default_install_dir(self) -> T.Tuple[str, str]:
         return self.environment.get_bindir(), '{bindir}'
@@ -2044,18 +2063,12 @@ class StaticLibrary(BuildTarget):
         super().post_init()
         if 'cs' in self.compilers:
             raise InvalidArguments('Static libraries not supported for C#.')
-        if 'rust' in self.compilers:
-            # If no crate type is specified, or it's the generic lib type, use rlib
-            if not hasattr(self, 'rust_crate_type') or self.rust_crate_type == 'lib':
-                mlog.debug('Defaulting Rust static library target crate type to rlib')
-                self.rust_crate_type = 'rlib'
-            # Don't let configuration proceed with a non-static crate type
-            elif self.rust_crate_type not in ['rlib', 'staticlib']:
-                raise InvalidArguments(f'Crate type "{self.rust_crate_type}" invalid for static libraries; must be "rlib" or "staticlib"')
+        if self.uses_rust():
             # See https://github.com/rust-lang/rust/issues/110460
             if self.rust_crate_type == 'rlib' and any(c in self.name for c in ['-', ' ', '.']):
-                raise InvalidArguments('Rust crate type "rlib" does not allow spaces, periods or dashes in the library name '
-                                       'due to a limitation of rustc. Replace them with underscores, for example')
+                raise InvalidArguments(f'Rust crate {self.name} type {self.rust_crate_type} does not allow spaces, '
+                                       'periods or dashes in the library name due to a limitation of rustc. '
+                                       'Replace them with underscores, for example')
             if self.rust_crate_type == 'staticlib':
                 # FIXME: In the case of no-std we should not add those libraries,
                 # but we have no way to know currently.
@@ -2077,8 +2090,8 @@ class StaticLibrary(BuildTarget):
         if not hasattr(self, 'prefix'):
             self.prefix = 'lib'
         if not hasattr(self, 'suffix'):
-            if 'rust' in self.compilers:
-                if not hasattr(self, 'rust_crate_type') or self.rust_crate_type == 'rlib':
+            if self.uses_rust():
+                if self.rust_crate_type == 'rlib':
                     # default Rust static library suffix
                     self.suffix = 'rlib'
                 elif self.rust_crate_type == 'staticlib':
@@ -2086,7 +2099,7 @@ class StaticLibrary(BuildTarget):
             else:
                 self.suffix = 'a'
         self.filename = self.prefix + self.name + '.' + self.suffix
-        self.outputs = [self.filename]
+        self.outputs[0] = self.filename
 
     def get_link_deps_mapping(self, prefix: str) -> T.Mapping[str, str]:
         return {}
@@ -2099,12 +2112,20 @@ class StaticLibrary(BuildTarget):
 
     def process_kwargs(self, kwargs):
         super().process_kwargs(kwargs)
-        if 'rust_crate_type' in kwargs:
-            rust_crate_type = kwargs['rust_crate_type']
-            if isinstance(rust_crate_type, str):
+
+        rust_abi = kwargs.get('rust_abi')
+        rust_crate_type = kwargs.get('rust_crate_type')
+        if rust_crate_type:
+            if rust_abi:
+                raise InvalidArguments('rust_abi and rust_crate_type are mutually exclusive.')
+            if rust_crate_type == 'lib':
+                self.rust_crate_type = 'rlib'
+            elif rust_crate_type in {'rlib', 'staticlib'}:
                 self.rust_crate_type = rust_crate_type
             else:
-                raise InvalidArguments(f'Invalid rust_crate_type "{rust_crate_type}": must be a string.')
+                raise InvalidArguments(f'Crate type {rust_crate_type!r} invalid for static libraries; must be "rlib" or "staticlib"')
+        else:
+            self.rust_crate_type = 'staticlib' if rust_abi == 'c' else 'rlib'
 
     def is_linkable_target(self):
         return True
@@ -2145,18 +2166,12 @@ class SharedLibrary(BuildTarget):
 
     def post_init(self) -> None:
         super().post_init()
-        if 'rust' in self.compilers:
-            # If no crate type is specified, or it's the generic lib type, use dylib
-            if not hasattr(self, 'rust_crate_type') or self.rust_crate_type == 'lib':
-                mlog.debug('Defaulting Rust dynamic library target crate type to "dylib"')
-                self.rust_crate_type = 'dylib'
-            # Don't let configuration proceed with a non-dynamic crate type
-            elif self.rust_crate_type not in ['dylib', 'cdylib', 'proc-macro']:
-                raise InvalidArguments(f'Crate type "{self.rust_crate_type}" invalid for dynamic libraries; must be "dylib", "cdylib", or "proc-macro"')
+        if self.uses_rust():
             # See https://github.com/rust-lang/rust/issues/110460
             if self.rust_crate_type != 'cdylib' and any(c in self.name for c in ['-', ' ', '.']):
-                raise InvalidArguments('Rust crate types "dylib" and "proc-macro" do not allow spaces, periods or dashes in the library name '
-                                       'due to a limitation of rustc. Replace them with underscores, for example')
+                raise InvalidArguments(f'Rust crate {self.name} type {self.rust_crate_type} does not allow spaces, '
+                                       'periods or dashes in the library name due to a limitation of rustc. '
+                                       'Replace them with underscores, for example')
 
         if not hasattr(self, 'prefix'):
             self.prefix = None
@@ -2327,14 +2342,19 @@ class SharedLibrary(BuildTarget):
                     'a file object or a Custom Target')
             self.process_link_depends(path)
 
-        if 'rust_crate_type' in kwargs:
-            rust_crate_type = kwargs['rust_crate_type']
-            if isinstance(rust_crate_type, str):
+        rust_abi = kwargs.get('rust_abi')
+        rust_crate_type = kwargs.get('rust_crate_type')
+        if rust_crate_type:
+            if rust_abi:
+                raise InvalidArguments('rust_abi and rust_crate_type are mutually exclusive.')
+            if rust_crate_type == 'lib':
+                self.rust_crate_type = 'dylib'
+            elif rust_crate_type in {'dylib', 'cdylib', 'proc-macro'}:
                 self.rust_crate_type = rust_crate_type
             else:
-                raise InvalidArguments(f'Invalid rust_crate_type "{rust_crate_type}": must be a string.')
-            if rust_crate_type == 'proc-macro':
-                FeatureNew.single_use('Rust crate type "proc-macro"', '0.62.0', self.subproject)
+                raise InvalidArguments(f'Crate type {rust_crate_type!r} invalid for shared libraries; must be "dylib", "cdylib" or "proc-macro"')
+        else:
+            self.rust_crate_type = 'cdylib' if rust_abi == 'c' else 'dylib'
 
     def get_import_filename(self) -> T.Optional[str]:
         """
@@ -2967,6 +2987,7 @@ class Data(HoldableObject):
     rename: T.List[str] = None
     install_tag: T.Optional[str] = None
     data_type: str = None
+    follow_symlinks: T.Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.rename is None:

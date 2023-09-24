@@ -16,7 +16,7 @@ from ..dependencies.base import Dependency
 from ..mesonlib import EnvironmentVariables, MachineChoice, File, FileMode, FileOrString, OptionKey
 from ..modules.cmake import CMakeSubprojectOptions
 from ..programs import ExternalProgram
-
+from .type_checking import PkgConfigDefineType
 
 class FuncAddProjectArgs(TypedDict):
 
@@ -124,6 +124,7 @@ class FuncInstallSubdir(TypedDict):
     exclude_files: T.List[str]
     exclude_directories: T.List[str]
     install_mode: FileMode
+    follow_symlinks: T.Optional[bool]
 
 
 class FuncInstallData(TypedDict):
@@ -132,6 +133,7 @@ class FuncInstallData(TypedDict):
     sources: T.List[FileOrString]
     rename: T.List[str]
     install_mode: FileMode
+    follow_symlinks: T.Optional[bool]
 
 
 class FuncInstallHeaders(TypedDict):
@@ -139,6 +141,7 @@ class FuncInstallHeaders(TypedDict):
     install_dir: T.Optional[str]
     install_mode: FileMode
     subdir: T.Optional[str]
+    follow_symlinks: T.Optional[bool]
 
 
 class FuncInstallMan(TypedDict):
@@ -253,7 +256,7 @@ class FeatureOptionRequire(TypedDict):
 class DependencyPkgConfigVar(TypedDict):
 
     default: T.Optional[str]
-    define_variable: T.List[str]
+    define_variable: PkgConfigDefineType
 
 
 class DependencyGetVariable(TypedDict):
@@ -263,7 +266,7 @@ class DependencyGetVariable(TypedDict):
     configtool: T.Optional[str]
     internal: T.Optional[str]
     default_value: T.Optional[str]
-    pkgconfig_define: T.List[str]
+    pkgconfig_define: PkgConfigDefineType
 
 
 class ConfigurationDataSet(TypedDict):
@@ -296,6 +299,7 @@ class ConfigureFile(TypedDict):
     command: T.Optional[T.List[T.Union[build.Executable, ExternalProgram, Compiler, File, str]]]
     input: T.List[FileOrString]
     configuration: T.Optional[T.Union[T.Dict[str, T.Union[str, int, bool]], build.ConfigurationData]]
+    macro_name: T.Optional[str]
 
 
 class Subproject(ExtractRequired):
