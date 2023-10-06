@@ -89,7 +89,7 @@ from .type_checking import (
     REQUIRED_KW,
     SHARED_LIB_KWS,
     SHARED_MOD_KWS,
-    SOURCES_KW,
+    DEPENDENCY_SOURCES_KW,
     SOURCES_VARARGS,
     STATIC_LIB_KWS,
     VARIABLES_KW,
@@ -687,7 +687,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         INCLUDE_DIRECTORIES,
         LINK_WITH_KW,
         LINK_WHOLE_KW.evolve(since='0.46.0'),
-        SOURCES_KW,
+        DEPENDENCY_SOURCES_KW,
         KwargInfo('extra_files', ContainerTypeInfo(list, (mesonlib.File, str)), listify=True, default=[], since='1.2.0'),
         VARIABLES_KW.evolve(since='0.54.0', since_values={list: '0.56.0'}),
         KwargInfo('version', (str, NoneType)),
@@ -1806,7 +1806,6 @@ class Interpreter(InterpreterBase, HoldableObject):
     def func_disabler(self, node, args, kwargs):
         return Disabler()
 
-    @FeatureNewKwargs('executable', '0.42.0', ['implib'])
     @permittedKwargs(build.known_exe_kwargs)
     @typed_pos_args('executable', str, varargs=SOURCES_VARARGS)
     @typed_kwargs('executable', *EXECUTABLE_KWS, allow_unknown=True)
@@ -1859,7 +1858,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         return self.build_library(node, args, kwargs)
 
     @permittedKwargs(build.known_jar_kwargs)
-    @typed_pos_args('jar', str, varargs=SOURCES_VARARGS)
+    @typed_pos_args('jar', str, varargs=(str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList, build.ExtractedObjects, build.BuildTarget))
     @typed_kwargs('jar', *JAR_KWS, allow_unknown=True)
     def func_jar(self, node: mparser.BaseNode,
                  args: T.Tuple[str, T.List[T.Union[str, mesonlib.File, build.GeneratedTypes]]],
@@ -3104,6 +3103,9 @@ class Interpreter(InterpreterBase, HoldableObject):
     @T.overload
     def source_strings_to_files(self, sources: T.List['SourceInputs'], strict: bool = True) -> T.List['SourceOutputs']: ... # noqa: F811
 
+    @T.overload
+    def source_strings_to_files(self, sources: T.List[SourcesVarargsType], strict: bool = True) -> T.List['SourceOutputs']: ... # noqa: F811
+
     def source_strings_to_files(self, sources: T.List['SourceInputs'], strict: bool = True) -> T.List['SourceOutputs']: # noqa: F811
         """Lower inputs to a list of Targets and Files, replacing any strings.
 
@@ -3167,8 +3169,12 @@ class Interpreter(InterpreterBase, HoldableObject):
         # To permit an executable and a shared library to have the
         # same name, such as "foo.exe" and "libfoo.a".
         idname = tobj.get_id()
-        if idname in self.build.targets:
-            raise InvalidCode(f'Tried to create target "{name}", but a target of that name already exists.')
+        for t in self.build.targets.values():
+            if t.get_id() == idname:
+                raise InvalidCode(f'Tried to create target "{name}", but a target of that name already exists.')
+            if isinstance(tobj, build.Executable) and isinstance(t, build.Executable) and t.name == tobj.name:
+                FeatureNew.single_use('multiple executables with the same name but different suffixes',
+                                      '1.3.0', self.subproject, location=self.current_node)
 
         if isinstance(tobj, build.BuildTarget):
             self.add_languages(tobj.missing_languages, True, tobj.for_machine)
@@ -3224,9 +3230,31 @@ class Interpreter(InterpreterBase, HoldableObject):
         else:
             raise InterpreterException(f'Unknown default_library value: {default_library}.')
 
-    def build_target(self, node: mparser.BaseNode, args, kwargs, targetclass):
-        @FeatureNewKwargs('build target', '1.2.0', ['rust_dependency_map'])
-        @FeatureNewKwargs('build target', '0.42.0', ['rust_crate_type', 'build_rpath', 'implicit_include_directories'])
+    @T.overload
+    def build_target(self, node: mparser.BaseNode, args: T.Tuple[str, SourcesVarargsType],
+                     kwargs: kwtypes.Executable, targetclass: T.Type[build.Executable]) -> build.Executable: ...
+
+    @T.overload
+    def build_target(self, node: mparser.BaseNode, args: T.Tuple[str, SourcesVarargsType],
+                     kwargs: kwtypes.StaticLibrary, targetclass: T.Type[build.StaticLibrary]) -> build.StaticLibrary: ...
+
+    @T.overload
+    def build_target(self, node: mparser.BaseNode, args: T.Tuple[str, SourcesVarargsType],
+                     kwargs: kwtypes.SharedLibrary, targetclass: T.Type[build.SharedLibrary]) -> build.SharedLibrary: ...
+
+    @T.overload
+    def build_target(self, node: mparser.BaseNode, args: T.Tuple[str, SourcesVarargsType],
+                     kwargs: kwtypes.SharedModule, targetclass: T.Type[build.SharedModule]) -> build.SharedModule: ...
+
+    @T.overload
+    def build_target(self, node: mparser.BaseNode, args: T.Tuple[str, SourcesVarargsType],
+                     kwargs: kwtypes.Jar, targetclass: T.Type[build.Jar]) -> build.Jar: ...
+
+    def build_target(self, node: mparser.BaseNode, args: T.Tuple[str, SourcesVarargsType],
+                     kwargs: T.Union[kwtypes.Executable, kwtypes.StaticLibrary, kwtypes.SharedLibrary, kwtypes.SharedModule, kwtypes.Jar],
+                     targetclass: T.Type[T.Union[build.Executable, build.StaticLibrary, build.SharedModule, build.SharedLibrary, build.Jar]]
+                     ) -> T.Union[build.Executable, build.StaticLibrary, build.SharedModule, build.SharedLibrary, build.Jar]:
+        @FeatureNewKwargs('build target', '0.42.0', ['build_rpath', 'implicit_include_directories'])
         @FeatureNewKwargs('build target', '0.41.0', ['rust_args'])
         @FeatureNewKwargs('build target', '0.38.0', ['build_by_default'])
         @FeatureNewKwargs('build target', '0.48.0', ['gnu_symbol_visibility'])
@@ -3241,8 +3269,8 @@ class Interpreter(InterpreterBase, HoldableObject):
             # Silently force to native because that's the only sensible value
             # and rust_crate_type is deprecated any way.
             for_machine = MachineChoice.BUILD
-        if 'sources' in kwargs:
-            sources += listify(kwargs['sources'])
+        # Avoid mutating, since there could be other references to sources
+        sources = sources + kwargs['sources']
         if any(isinstance(s, build.BuildTarget) for s in sources):
             FeatureBroken.single_use('passing references to built targets as a source file', '1.1.0', self.subproject,
                                      'Consider using `link_with` or `link_whole` if you meant to link, or dropping them as otherwise they are ignored.',
@@ -3306,6 +3334,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         kwargs['include_directories'] = self.extract_incdirs(kwargs)
 
         if targetclass is build.Executable:
+            kwargs = T.cast('kwtypes.Executable', kwargs)
             if kwargs['gui_app'] is not None:
                 if kwargs['win_subsystem'] is not None:
                     raise InvalidArguments.from_node(
@@ -3315,6 +3344,21 @@ class Interpreter(InterpreterBase, HoldableObject):
                     kwargs['win_subsystem'] = 'windows'
             if kwargs['win_subsystem'] is None:
                 kwargs['win_subsystem'] = 'console'
+
+            if kwargs['implib']:
+                if kwargs['export_dynamic'] is False:
+                    FeatureDeprecated.single_use('implib overrides explict export_dynamic off', '1.3.0', self.subprojct,
+                                                 'Do not set ths if want export_dynamic disabled if implib is enabled',
+                                                 location=node)
+                kwargs['export_dynamic'] = True
+            elif kwargs['export_dynamic']:
+                if kwargs['implib'] is False:
+                    raise InvalidArguments('"implib" keyword" must not be false if "export_dynamic" is set and not false.')
+                kwargs['implib'] = True
+            if kwargs['export_dynamic'] is None:
+                kwargs['export_dynamic'] = False
+            if kwargs['implib'] is None:
+                kwargs['implib'] = False
 
         target = targetclass(name, self.subdir, self.subproject, for_machine, srcs, struct, objs,
                              self.environment, self.compilers[for_machine], kwargs)

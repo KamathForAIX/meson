@@ -697,7 +697,7 @@ class CLikeCompiler(Compiler):
         star_idx = p.stdout.find(delim_start)
         end_idx = p.stdout.rfind(delim_end)
         if (star_idx == -1) or (end_idx == -1) or (star_idx == end_idx):
-            raise AssertionError('BUG: Delimiters not found in preprocessor output!')
+            raise mesonlib.MesonBugException('Delimiters not found in preprocessor output.')
         define_value = p.stdout[star_idx + len(delim_start):end_idx]
 
         if define_value == sentinel_undef:
@@ -1084,6 +1084,10 @@ class CLikeCompiler(Compiler):
 
     @staticmethod
     def _sort_shlibs_openbsd(libs: T.List[str]) -> T.List[str]:
+        def tuple_key(x: str) -> T.Tuple[int, ...]:
+            ver = x.rsplit('.so.', maxsplit=1)[1]
+            return tuple(int(i) for i in ver.split('.'))
+
         filtered: T.List[str] = []
         for lib in libs:
             # Validate file as a shared library of type libfoo.so.X.Y
@@ -1091,12 +1095,11 @@ class CLikeCompiler(Compiler):
             if len(ret) != 2:
                 continue
             try:
-                float(ret[1])
+                tuple(int(i) for i in ret[1].split('.'))
             except ValueError:
                 continue
             filtered.append(lib)
-        float_cmp = lambda x: float(x.rsplit('.so.', maxsplit=1)[1])
-        return sorted(filtered, key=float_cmp, reverse=True)
+        return sorted(filtered, key=tuple_key, reverse=True)
 
     @classmethod
     def _get_trials_from_pattern(cls, pattern: str, directory: str, libname: str) -> T.List[Path]:

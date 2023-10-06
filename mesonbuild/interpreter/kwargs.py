@@ -16,7 +16,7 @@ from ..dependencies.base import Dependency
 from ..mesonlib import EnvironmentVariables, MachineChoice, File, FileMode, FileOrString, OptionKey
 from ..modules.cmake import CMakeSubprojectOptions
 from ..programs import ExternalProgram
-from .type_checking import PkgConfigDefineType
+from .type_checking import PkgConfigDefineType, SourcesVarargsType
 
 class FuncAddProjectArgs(TypedDict):
 
@@ -103,6 +103,7 @@ class GeneratorProcess(TypedDict):
 
     preserve_path_from: T.Optional[str]
     extra_args: T.List[str]
+    env: EnvironmentVariables
 
 class DependencyMethodPartialDependency(TypedDict):
 
@@ -331,14 +332,31 @@ class _BuildTarget(_BaseBuildTarget):
 
     """Arguments shared by non-JAR functions"""
 
+    rust_dependency_map: T.Dict[str, str]
+    sources: SourcesVarargsType
+
+
+class _LibraryMixin(TypedDict):
+
+    rust_abi: T.Optional[Literal['c', 'rust']]
 
 class Executable(_BuildTarget):
 
+    export_dynamic: T.Optional[bool]
     gui_app: T.Optional[bool]
+    implib: T.Optional[T.Union[str, bool]]
+    pie: T.Optional[bool]
+    vs_module_defs: T.Optional[T.Union[str, File, build.CustomTarget, build.CustomTargetIndex]]
     win_subsystem: T.Optional[str]
 
 
-class StaticLibrary(_BuildTarget):
+class _StaticLibMixin(TypedDict):
+
+    prelink: bool
+    pic: T.Optional[bool]
+
+
+class StaticLibrary(_BuildTarget, _StaticLibMixin, _LibraryMixin):
     pass
 
 
@@ -347,17 +365,19 @@ class _SharedLibMixin(TypedDict):
     darwin_versions: T.Optional[T.Tuple[str, str]]
     soversion: T.Optional[str]
     version: T.Optional[str]
+    vs_module_defs: T.Optional[T.Union[str, File, build.CustomTarget, build.CustomTargetIndex]]
 
 
-class SharedLibrary(_BuildTarget, _SharedLibMixin):
+class SharedLibrary(_BuildTarget, _SharedLibMixin, _LibraryMixin):
     pass
 
 
-class SharedModule(_BuildTarget):
-    pass
+class SharedModule(_BuildTarget, _LibraryMixin):
+
+    vs_module_defs: T.Optional[T.Union[str, File, build.CustomTarget, build.CustomTargetIndex]]
 
 
-class Library(_BuildTarget, _SharedLibMixin):
+class Library(_BuildTarget, _SharedLibMixin, _StaticLibMixin, _LibraryMixin):
 
     """For library, both_library, and as a base for build_target"""
 
@@ -372,6 +392,7 @@ class Jar(_BaseBuildTarget):
 
     main_class: str
     java_resources: T.Optional[build.StructuredSources]
+    sources: T.Union[str, File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList, build.ExtractedObjects, build.BuildTarget]
 
 
 class FuncDeclareDependency(TypedDict):
